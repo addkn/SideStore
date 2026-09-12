@@ -1,6 +1,8 @@
 name: Nightly SideStore Build
 
 
+
+
 on:
   push:
     branches: [develop]
@@ -16,9 +18,13 @@ on:
   workflow_dispatch:
 
 
+
+
 concurrency:
   group: ${{ github.ref }}
   cancel-in-progress: true
+
+
 
 
 jobs:
@@ -32,11 +38,14 @@ jobs:
       UPSTREAM_CHANNEL: ""
 
 
+
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
+
 
       - name: Apply PBKDF2 diagnostic fingerprint
         if: github.ref_name == 'diagnostic/pbkdf2-fingerprint'
@@ -97,6 +106,8 @@ jobs:
         if: steps.build_gate.outputs.should_skip != 'true'
 
 
+
+
       # --------------------------------------------------
       # runtime env setup
       # --------------------------------------------------
@@ -125,6 +136,8 @@ jobs:
           xcode-version: "26.4"
 
 
+
+
       - name: Restore Cache (exact)
         if: steps.build_gate.outputs.should_skip != 'true'
         id: xcode-cache-exact
@@ -134,6 +147,8 @@ jobs:
             ~/Library/Developer/Xcode/DerivedData
             ~/Library/Caches/org.swift.swiftpm
           key: xcode-build-cache-${{ github.ref_name }}-${{ github.sha }}
+
+
 
 
       - name: Restore Cache (last)
@@ -147,6 +162,8 @@ jobs:
             ~/Library/Developer/Xcode/DerivedData
             ~/Library/Caches/org.swift.swiftpm
           key: xcode-build-cache-${{ github.ref_name }}-
+
+
 
 
       # --------------------------------------------------
@@ -204,6 +221,8 @@ jobs:
           key: xcode-build-cache-${{ github.ref_name }}-${{ github.sha }}
 
 
+
+
       - name: Tests Run
         if: >
           steps.build_gate.outputs.should_skip != 'true' &&
@@ -227,6 +246,8 @@ jobs:
           path: build-logs.zip
 
 
+
+
       - uses: actions/upload-artifact@v4
         if: >
           steps.build_gate.outputs.should_skip != 'true' &&
@@ -237,6 +258,8 @@ jobs:
           path: tests-build-logs.zip
 
 
+
+
       - uses: actions/upload-artifact@v4
         if: >
           steps.build_gate.outputs.should_skip != 'true' &&
@@ -245,6 +268,8 @@ jobs:
         with:
           name: tests-run-logs-${{ env.SHORT_COMMIT }}.zip
           path: tests-run-logs.zip
+
+
 
 
       - uses: actions/upload-artifact@v4
@@ -259,6 +284,8 @@ jobs:
           path: SideStore.dSYMs.zip
 
 
+
+
       - uses: actions/checkout@v4
         if: steps.build_gate.outputs.should_skip != 'true' && env.DEPLOY_KEY != ''
         with:
@@ -266,6 +293,8 @@ jobs:
           ref: "main"
           token: ${{ secrets.CROSS_REPO_PUSH_KEY }}
           path: "SideStore/apps-v2.json"
+
+
 
 
       - name: Generate Metadata
@@ -298,11 +327,13 @@ jobs:
       
 
 
+
+
       # --------------------------------------------------
       # upload release to GH
       # --------------------------------------------------
       - name: Upload Release
-        if: steps.build_gate.outputs.should_skip != 'true'
+        if: steps.build_gate.outputs.should_skip != 'true' && github.repository == 'SideStore/SideStore'
         run: |
           python3 scripts/ci/workflow.py upload-release \
             "$RELEASE_NAME" \
