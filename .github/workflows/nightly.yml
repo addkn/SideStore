@@ -224,7 +224,12 @@ jobs:
                       raise SystemExit(f"{path}: expected one SRP patch anchor, found {text.count(old)} for {old[:60]!r}")
                   text = text.replace(old, new, 1)
               sha_anchor = "    private static func sha256(_ data: Data) -> Data {\n        let digest = SHA256.hash(data: data)\n        return Data(digest)\n    }\n"
-              sha_block = sha_anchor + "\n    private static func hexString(_ data: Data) -> String {\n        data.map { String(format: "%02x", $0) }.joined()\n    }\n"
+              sha_block = sha_anchor + "\n".join([
+                  "",
+                  '    private static func hexString(_ data: Data) -> String {',
+                  '        data.map { String(format: "%02x", $0) }.joined()',
+                  '    }',
+              ]) + "\n"
               if text.count(sha_anchor) != 1:
                   raise SystemExit(f"{path}: SHA256 helper anchor not found exactly once")
               text = text.replace(sha_anchor, sha_block, 1)
