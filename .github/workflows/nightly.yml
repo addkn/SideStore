@@ -1,5 +1,6 @@
 name: Nightly SideStore Build
 
+
 on:
   push:
     branches: [develop]
@@ -14,9 +15,11 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
+
 concurrency:
   group: ${{ github.ref }}
   cancel-in-progress: true
+
 
 jobs:
   build:
@@ -28,11 +31,42 @@ jobs:
       CHANNEL: nightly
       UPSTREAM_CHANNEL: ""
 
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
+
+      - name: Apply PBKDF2 diagnostic fingerprint
+        if: github.ref_name == 'diagnostic/pbkdf2-fingerprint'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("Dependencies/SideSign/Sources/DeveloperPortal/Authentication.swift")
+          lines = path.read_text().splitlines(keepends=True)
+          marker = "guard let derivedPasswordKey = CryptoUtilities.pbkdf2SHA256("
+          starts = [i for i, line in enumerate(lines) if marker in line]
+          if len(starts) != 1:
+              raise SystemExit(f"Expected exactly one PBKDF2 derivation, found {len(starts)}")
+          end = next((i for i in range(starts[0], len(lines)) if "Failed to derive PBKDF2 password key" in lines[i]), None)
+          if end is None:
+              raise SystemExit("PBKDF2 derivation failure message not found")
+          end = next((i for i in range(end, len(lines)) if lines[i].strip() == "}"), None)
+          if end is None:
+              raise SystemExit("PBKDF2 derivation closing brace not found")
+          diagnostic_line = r'            verboseLog("[SideSign] PBKDF2 key fingerprint: \(derivedPasswordKeyFingerprint.hexEncodedString())")' + "\n"
+          insertion = [
+              "        if let derivedPasswordKeyFingerprint = CryptoUtilities.sha256(derivedPasswordKey) {\n",
+              diagnostic_line,
+              "        }\n",
+          ]
+          lines[end + 1:end + 1] = insertion
+          path.write_text("".join(lines))
+          PY
+
+
 
       - name: Find Last Successful commit
         run: |
@@ -62,6 +96,7 @@ jobs:
       - run: brew install ldid xcbeautify
         if: steps.build_gate.outputs.should_skip != 'true'
 
+
       # --------------------------------------------------
       # runtime env setup
       # --------------------------------------------------
@@ -89,6 +124,7 @@ jobs:
         with:
           xcode-version: "26.4"
 
+
       - name: Restore Cache (exact)
         if: steps.build_gate.outputs.should_skip != 'true'
         id: xcode-cache-exact
@@ -98,6 +134,7 @@ jobs:
             ~/Library/Developer/Xcode/DerivedData
             ~/Library/Caches/org.swift.swiftpm
           key: xcode-build-cache-${{ github.ref_name }}-${{ github.sha }}
+
 
       - name: Restore Cache (last)
         if: >
@@ -110,6 +147,7 @@ jobs:
             ~/Library/Developer/Xcode/DerivedData
             ~/Library/Caches/org.swift.swiftpm
           key: xcode-build-cache-${{ github.ref_name }}-
+
 
       # --------------------------------------------------
       # build and test
@@ -165,6 +203,7 @@ jobs:
             ~/Library/Caches/org.swift.swiftpm
           key: xcode-build-cache-${{ github.ref_name }}-${{ github.sha }}
 
+
       - name: Tests Run
         if: >
           steps.build_gate.outputs.should_skip != 'true' &&
@@ -187,6 +226,7 @@ jobs:
           name: build-logs-${{ env.MARKETING_VERSION }}.zip
           path: build-logs.zip
 
+
       - uses: actions/upload-artifact@v4
         if: >
           steps.build_gate.outputs.should_skip != 'true' &&
@@ -196,6 +236,7 @@ jobs:
           name: tests-build-logs-${{ env.SHORT_COMMIT }}.zip
           path: tests-build-logs.zip
 
+
       - uses: actions/upload-artifact@v4
         if: >
           steps.build_gate.outputs.should_skip != 'true' &&
@@ -204,6 +245,7 @@ jobs:
         with:
           name: tests-run-logs-${{ env.SHORT_COMMIT }}.zip
           path: tests-run-logs.zip
+
 
       - uses: actions/upload-artifact@v4
         if: steps.build_gate.outputs.should_skip != 'true'
@@ -216,6 +258,7 @@ jobs:
           name: SideStore-${{ env.MARKETING_VERSION }}-dSYMs.zip
           path: SideStore.dSYMs.zip
 
+
       - uses: actions/checkout@v4
         if: steps.build_gate.outputs.should_skip != 'true' && env.DEPLOY_KEY != ''
         with:
@@ -223,6 +266,7 @@ jobs:
           ref: "main"
           token: ${{ secrets.CROSS_REPO_PUSH_KEY }}
           path: "SideStore/apps-v2.json"
+
 
       - name: Generate Metadata
         if: steps.build_gate.outputs.should_skip != 'true'
@@ -252,6 +296,7 @@ jobs:
             "$CHANNEL" \
             "$MARKETING_VERSION"
       
+
 
       # --------------------------------------------------
       # upload release to GH
