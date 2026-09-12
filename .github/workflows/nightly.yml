@@ -176,6 +176,122 @@ jobs:
           python3 scripts/ci/workflow.py clean-derived-data
           python3 scripts/ci/workflow.py clean-spm-cache
 
+      - name: Apply SRP diagnostic fingerprints
+        if: github.ref_name == 'diagnostic/pbkdf2-fingerprint'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          auth = Path("Dependencies/SideSign/Sources/DeveloperPortal/Authentication.swift")
+          text = auth.read_text()
+
+          pbkdf2_block = r'''        if let derivedPasswordKeyFingerprint = CryptoUtilities.sha256(derivedPasswordKey) {
+            verboseLog("[SideSign] PBKDF2 key fingerprint: \(derivedPasswordKeyFingerprint.hexEncodedString())")
+        }
+
+'''
+          challenge_anchor = "        guard let verificationMessage = srpClient.processChallenge("
+          if pbkdf2_block not in text:
+              if text.count(challenge_anchor) != 1:
+                  raise SystemExit("Expected exactly one SRP challenge anchor")
+              text = text.replace(challenge_anchor, pbkdf2_block + challenge_anchor, 1)
+
+          srp_block = r'''        if !isHexadecimal, let fingerprints = srpClient.diagnosticIntermediateFingerprints() {
+            verboseLog("[SideSign] SRP x fingerprint: \(fingerprints.x)")
+            verboseLog("[SideSign] SRP S fingerprint: \(fingerprints.s)")
+            verboseLog("[SideSign] SRP K fingerprint: \(fingerprints.k)")
+        }
+
+'''
+          srp_anchor = '        debugLog("[SideSign] Initiating SRP authentication step 2 (complete)...")'
+          if srp_block not in text:
+              if text.count(srp_anchor) != 1:
+                  raise SystemExit("Expected exactly one SRP complete-step anchor")
+              text = text.replace(srp_anchor, srp_block + srp_anchor, 1)
+
+          auth.write_text(text)
+          PY
+
+          xcodebuild -resolvePackageDependencies \
+            -project AltStore.xcodeproj \
+            -scheme SideStore \
+            -sdk iphoneos \
+            -configuration Release
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          roots = [
+              Path.home() / "Library/Developer/Xcode/DerivedData",
+              Path.home() / "Library/Caches/org.swift.swiftpm",
+          ]
+          paths = sorted({
+              path
+              for root in roots
+              if root.exists()
+              for path in root.glob("**/GSACryptoKit/Sources/SRPClient.swift")
+          })
+          if not paths:
+              raise SystemExit("GSACryptoKit SRPClient.swift checkout was not found after dependency resolution")
+
+          for path in paths:
+              text = path.read_text()
+              if "diagnosticIntermediateFingerprints" in text:
+                  continue
+
+              replacements = [
+                  (
+                      "    private var bnK: Data?    // session key (32 bytes)\n"
+                      "    private var expectedM2: Data?\n",
+                      "    private var bnK: Data?    // session key (32 bytes)\n"
+                      "    private var xHash: Data?\n"
+                      "    private var sBytes: Data?\n"
+                      "    private var expectedM2: Data?\n",
+                  ),
+                  (
+                      "        let xHash = Self.sha256(salt + h1)\n"
+                      "        let bnx = BigUInt(data: xHash)\n",
+                      "        let xHash = Self.sha256(salt + h1)\n"
+                      "        self.xHash = xHash\n"
+                      "        let bnx = BigUInt(data: xHash)\n",
+                  ),
+                  (
+                      "        let sBytes = bnS.serialize(paddedTo: Self.GroupSize)\n\n"
+                      "        // 9. Session key K = SHA256(S)\n",
+                      "        let sBytes = bnS.serialize(paddedTo: Self.GroupSize)\n"
+                      "        self.sBytes = sBytes\n\n"
+                      "        // 9. Session key K = SHA256(S)\n",
+                  ),
+                  (
+                      "    public func verifyServerProof(_ proof: Data) -> Bool {\n",
+                      "    public func diagnosticIntermediateFingerprints() -> (x: String, s: String, k: String)? {\n"
+                      "        guard let xHash = xHash, let sBytes = sBytes, let bnK = bnK else { return nil }\n"
+                      "        return (\n"
+                      "            Self.hexString(Self.sha256(xHash)),\n"
+                      "            Self.hexString(Self.sha256(sBytes)),\n"
+                      "            Self.hexString(Self.sha256(bnK))\n"
+                      "        )\n"
+                      "    }\n\n"
+                      "    public func verifyServerProof(_ proof: Data) -> Bool {\n",
+                  ),
+              ]
+              for old, new in replacements:
+                  if text.count(old) != 1:
+                      raise SystemExit(f"{path}: expected one SRP patch anchor, found {text.count(old)} for {old[:60]!r}")
+                  text = text.replace(old, new, 1)
+
+              sha_anchor = "    private static func sha256(_ data: Data) -> Data {\n        let digest = SHA256.hash(data: data)\n        return Data(digest)\n    }\n"
+              sha_block = sha_anchor + "\n    private static func hexString(_ data: Data) -> String {\n        data.map { String(format: "%02x", $0) }.joined()\n    }\n"
+              if text.count(sha_anchor) != 1:
+                  raise SystemExit(f"{path}: SHA256 helper anchor not found exactly once")
+              text = text.replace(sha_anchor, sha_block, 1)
+              path.write_text(text)
+              print(f"Patched {path}")
+          PY
+
+
+
       - name: Boot simulator (async)
         if: >
           steps.build_gate.outputs.should_skip != 'true' &&
