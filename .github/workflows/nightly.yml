@@ -190,6 +190,464 @@ jobs:
             verboseLog("[SideSign] PBKDF2 key fingerprint: \(derivedPasswordKeyFingerprint.hexEncodedString())")
         }
 
+          '''
+          challenge_anchor = "        guard let verificationMessage = srpClient.processChallenge("
+          if pbkdf2_block not in text:
+              if text.count(challenge_anchor) != 1:
+                  raise SystemExit("Expected exactly one SRP challenge anchor")
+              text = text.replace(challenge_anchor, pbkdf2_block + challenge_anchor, 1)
+
+          srp_block = r'''        if !isHexadecimal, let fingerprints = srpClient.diagnosticIntermediateFingerprints() {
+            verboseLog("[SideSign] SRP x fingerprint: \(fingerprints.x)")
+            verboseLog("[SideSign] SRP S fingerprint: \(fingerprints.s)")
+            verboseLog("[SideSign] SRP K fingerprint: \(fingerprints.k)")
+        }
+
+          '''
+          srp_anchor = '        debugLog("[SideSign] Initiating SRP authentication step 2 (complete)...")'
+          if srp_block not in text:
+              if text.count(srp_anchor) != 1:
+                  raise SystemExit("Expected exactly one SRP complete-step anchor")
+              text = text.replace(srp_anchor, srp_block + srp_anchor, 1)
+
+          auth.write_text(text)
+          PY
+
+          xcodebuild -resolvePackageDependencies \
+            -project AltStore.xcodeproj \
+            -scheme SideStore \
+            -sdk iphoneos \
+            -configuration Release
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          roots = [
+              Path.home() / "Library/Developer/Xcode/DerivedData",
+              Path.home() / "Library/Caches/org.swift.swiftpm",
+          ]
+          paths = sorted({
+              path
+              for root in roots
+              if root.exists()
+              for path in root.glob("**/GSACryptoKit/Sources/SRPClient.swift")
+          })
+          if not paths:
+              raise SystemExit("GSACryptoKit SRPClient.swift checkout was not found after dependency resolution")
+
+          for path in paths:
+              text = path.read_text()
+              if "diagnosticIntermediateFingerprints" in text:
+                  continue
+
+              replacements = [
+                  (
+                      "    private var bnK: Data?    // session key (32 bytes)\n"
+                      "    private var expectedM2: Data?\n",
+                      "    private var bnK: Data?    // session key (32 bytes)\n"
+                      "    private var xHash: Data?\n"
+                      "    private var sBytes: Data?\n"
+                      "    private var expectedM2: Data?\n",
+                  ),
+                  (
+                      "        let xHash = Self.sha256(salt + h1)\n"
+                      "        let bnx = BigUInt(data: xHash)\n",
+                      "        let xHash = Self.sha256(salt + h1)\n"
+                      "        self.xHash = xHash\n"
+                      "        let bnx = BigUInt(data: xHash)\n",
+                  ),
+                  (
+                      "        let sBytes = bnS.serialize(paddedTo: Self.GroupSize)\n\n"
+                      "        // 9. Session key K = SHA256(S)\n",
+                      "        let sBytes = bnS.serialize(paddedTo: Self.GroupSize)\n"
+                      "        self.sBytes = sBytes\n\n"
+                      "        // 9. Session key K = SHA256(S)\n",
+                  ),
+                  (
+                      "    public func verifyServerProof(_ proof: Data) -> Bool {\n",
+                      "    public func diagnosticIntermediateFingerprints() -> (x: String, s: String, k: String)? {\n"
+                      "        guard let xHash = xHash, let sBytes = sBytes, let bnK = bnK else { return nil }\n"
+                      "        return (\n"
+                      "            Self.hexString(Self.sha256(xHash)),\n"
+                      "            Self.hexString(Self.sha256(sBytes)),\n"
+                      "            Self.hexString(Self.sha256(bnK))\n"
+                      "        )\n"
+                      "    }\n\n"
+                      "    public func verifyServerProof(_ proof: Data) -> Bool {\n",
+                  ),
+              ]
+              for old, new in replacements:
+                  if text.count(old) != 1:
+                      raise SystemExit(f"{path}: expected one SRP patch anchor, found {text.count(old)} for {old[:60]!r}")
+                  text = text.replace(old, new, 1)
+
+              sha_anchor = "    private static func sha256(_ data: Data) -> Data {\n        let digest = SHA256.hash(data: data)\n        return Data(digest)\n    }\n"
+              sha_block = sha_anchor + "\n    private static func hexString(_ data: Data) -> String {\n        data.map { String(format: "%02x", $0) }.joined()\n    }\n"
+              if text.count(sha_anchor) != 1:
+                  raise SystemExit(f"{path}: SHA256 helper anchor not found exactly once")
+              text = text.replace(sha_anchor, sha_block, 1)
+              path.write_text(text)
+              print(f"Patched {path}")
+          PY
+
+
+
+      - name: Boot simulator (async)
+        if: >
+          steps.build_gate.outputs.should_skip != 'true' &&
+          vars.ENABLE_TESTS == '1' &&
+          vars.ENABLE_TESTS_RUN == '1'
+        run: |
+          mkdir -p build/logs
+          python3 scripts/ci/workflow.py boot-sim-async "iPhone 17 Pro"
+
+      - name: Build
+        if: steps.build_gate.outputs.should_skip != 'true'
+        id: build
+        env:
+          BUILD_LOG_ZIP_PASSWORD: ${{ secrets.BUILD_LOG_ZIP_PASSWORD }}
+        run: |
+          python3 scripts/ci/workflow.py build; STATUS=$?
+          python3 scripts/ci/workflow.py encrypt-build
+          echo "encrypted=true" >> $GITHUB_OUTPUT
+          exit $STATUS
+
+      - name: Tests Build
+        if: >
+          steps.build_gate.outputs.should_skip != 'true' &&
+          vars.ENABLE_TESTS == '1' &&
+          vars.ENABLE_TESTS_BUILD == '1'
+        id: test-build
+        env:
+          BUILD_LOG_ZIP_PASSWORD: ${{ secrets.BUILD_LOG_ZIP_PASSWORD }}
+        run: |
+          python3 scripts/ci/workflow.py tests-build; STATUS=$?
+          python3 scripts/ci/workflow.py encrypt-tests-build
+          exit $STATUS
+
+      - name: Save Cache
+        if: >
+          steps.build_gate.outputs.should_skip != 'true' &&
+          steps.xcode-cache-fallback.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v3
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData
+            ~/Library/Caches/org.swift.swiftpm
+          key: xcode-build-cache-${{ github.ref_name }}-${{ github.sha }}
+
+
+
+
+      - name: Tests Run
+        if: >
+          steps.build_gate.outputs.should_skip != 'true' &&
+          vars.ENABLE_TESTS == '1' &&
+          vars.ENABLE_TESTS_RUN == '1'
+        id: test-run
+        env:
+          BUILD_LOG_ZIP_PASSWORD: ${{ secrets.BUILD_LOG_ZIP_PASSWORD }}
+        run: |
+          python3 scripts/ci/workflow.py tests-run "iPhone 17 Pro"; STATUS=$?
+          python3 scripts/ci/workflow.py encrypt-tests-run
+          exit $STATUS
+
+      # --------------------------------------------------
+      # artifacts
+      # --------------------------------------------------
+      - uses: actions/upload-artifact@v4
+        if: steps.build_gate.outputs.should_skip != 'true'
+        with:
+          name: build-logs-${{ env.MARKETING_VERSION }}.zip
+          path: build-logs.zip
+
+
+
+
+      - uses: actions/upload-artifact@v4
+        if: >
+          steps.build_gate.outputs.should_skip != 'true' &&
+          vars.ENABLE_TESTS == '1' &&
+          vars.ENABLE_TESTS_BUILD == '1'
+        with:
+          name: tests-build-logs-${{ env.SHORT_COMMIT }}.zip
+          path: tests-build-logs.zip
+
+
+
+
+      - uses: actions/upload-artifact@v4
+        if: >
+          steps.build_gate.outputs.should_skip != 'true' &&
+          vars.ENABLE_TESTS == '1' &&
+          vars.ENABLE_TESTS_RUN == '1'
+        with:
+          name: tests-run-logs-${{ env.SHORT_COMMIT }}.zip
+          path: tests-run-logs.zip
+
+
+
+
+      - uses: actions/upload-artifact@v4
+        if: steps.build_gate.outputs.should_skip != 'true'
+        with:
+          name: SideStore-${{ env.MARKETING_VERSION }}.ipa
+          path: SideStore.ipa
+      - uses: actions/upload-artifact@v4
+        if: steps.build_gate.outputs.should_skip != 'true'
+        with:
+          name: SideStore-${{ env.MARKETING_VERSION }}-dSYMs.zip
+          path: SideStore.dSYMs.zip
+
+
+
+
+      - uses: actions/checkout@v4
+        if: steps.build_gate.outputs.should_skip != 'true' && env.DEPLOY_KEY != ''
+        with:
+          repository: "SideStore/apps-v2.json"
+          ref: "main"
+          token: ${{ secrets.CROSS_REPO_PUSH_KEY }}
+          path: "SideStore/apps-v2.json"
+
+
+
+
+      - name: Generate Metadata
+        if: steps.build_gate.outputs.should_skip != 'true'
+        run: |
+          python3 scripts/ci/workflow.py dump-project-settings
+          PRODUCT_NAME=$(python3 scripts/ci/workflow.py read-product-name)
+          BUNDLE_ID=$(python3 scripts/ci/workflow.py read-bundle-id)
+          IPA_NAME="$PRODUCT_NAME.ipa"
+
+          python3 scripts/ci/workflow.py generate-metadata \
+            "$CHANNEL" \
+            "$SHORT_COMMIT" \
+            "$MARKETING_VERSION" \
+            "$CHANNEL" \
+            "$BUNDLE_ID" \
+            "$IPA_NAME" \
+            "$LAST_SUCCESSFUL_COMMIT"
+
+      - name: Deploy
+        if: steps.build_gate.outputs.should_skip != 'true' && env.DEPLOY_KEY != ''
+        run: |
+          SOURCE_JSON="_includes/source.json"
+
+          python3 scripts/ci/workflow.py deploy \
+            SideStore/apps-v2.json \
+            "$SOURCE_JSON" \
+            "$CHANNEL" \
+            "$MARKETING_VERSION"
+      
+
+
+
+
+      # --------------------------------------------------
+      # upload release to GH
+      # --------------------------------------------------
+      - name: Upload Release
+        if: steps.build_gate.outputs.should_skip != 'true' && github.repository == 'SideStore/SideStore'
+        run: |
+          python3 scripts/ci/workflow.py upload-release \
+            "$RELEASE_NAME" \
+            "$CHANNEL" \
+            "$GITHUB_SHA" \
+            "$GITHUB_REPOSITORY" \
+            "$UPSTREAM_CHANNEL"name: Nightly SideStore Build
+
+
+
+
+on:
+  push:
+    branches: [develop]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.editorconfig'
+      - '.gitignore'
+      - '.gitmodules'
+      - '.github/**'
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+
+
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+
+
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      DEPLOY_KEY: ${{ secrets.CROSS_REPO_PUSH_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_NAME: Nightly
+      CHANNEL: nightly
+      UPSTREAM_CHANNEL: ""
+
+
+
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+
+      - name: Apply PBKDF2 diagnostic fingerprint
+        if: github.ref_name == 'diagnostic/pbkdf2-fingerprint'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("Dependencies/SideSign/Sources/DeveloperPortal/Authentication.swift")
+          lines = path.read_text().splitlines(keepends=True)
+          marker = "guard let derivedPasswordKey = CryptoUtilities.pbkdf2SHA256("
+          starts = [i for i, line in enumerate(lines) if marker in line]
+          if len(starts) != 1:
+              raise SystemExit(f"Expected exactly one PBKDF2 derivation, found {len(starts)}")
+          end = next((i for i in range(starts[0], len(lines)) if "Failed to derive PBKDF2 password key" in lines[i]), None)
+          if end is None:
+              raise SystemExit("PBKDF2 derivation failure message not found")
+          end = next((i for i in range(end, len(lines)) if lines[i].strip() == "}"), None)
+          if end is None:
+              raise SystemExit("PBKDF2 derivation closing brace not found")
+          diagnostic_line = r'            verboseLog("[SideSign] PBKDF2 key fingerprint: \(derivedPasswordKeyFingerprint.hexEncodedString())")' + "\n"
+          insertion = [
+              "        if let derivedPasswordKeyFingerprint = CryptoUtilities.sha256(derivedPasswordKey) {\n",
+              diagnostic_line,
+              "        }\n",
+          ]
+          lines[end + 1:end + 1] = insertion
+          path.write_text("".join(lines))
+          PY
+
+
+
+      - name: Find Last Successful commit
+        run: |
+          LAST_SUCCESSFUL_COMMIT=$(python3 scripts/ci/workflow.py last-successful-commit \
+            "false" "${{ env.CHANNEL }}" || echo "")
+          echo "LAST_SUCCESSFUL_COMMIT=$LAST_SUCCESSFUL_COMMIT" | tee -a $GITHUB_ENV
+
+      - name: Check for new changes (on schedule)
+        id: check_changes
+        if: github.event_name == 'schedule'
+        run: |
+          NEW_COMMITS=$(python3 scripts/ci/workflow.py count-new-commits "$LAST_SUCCESSFUL_COMMIT")
+          SHOULD_BUILD=$([ "${NEW_COMMITS:-0}" -ge 1 ] && echo true || echo false)
+          echo "should_build=$SHOULD_BUILD" >> $GITHUB_OUTPUT
+          echo "NEW_COMMITS=$NEW_COMMITS" | tee -a $GITHUB_ENV
+
+      - name: Should Skip Building (on schedule)
+        id: build_gate
+        run: |
+          SHOULD_SKIP=$(
+            { [ "${{ github.event_name }}" = "schedule" ] && \
+              [ "${{ steps.check_changes.outputs.should_build }}" != "true" ]; \
+            } && echo true || echo false
+          )
+          echo "should_skip=$SHOULD_SKIP" >> $GITHUB_OUTPUT
+
+      - run: brew install ldid xcbeautify
+        if: steps.build_gate.outputs.should_skip != 'true'
+
+
+
+
+      # --------------------------------------------------
+      # runtime env setup
+      # --------------------------------------------------
+      - name: Setup Env
+        if: steps.build_gate.outputs.should_skip != 'true'
+        run: |
+          BUILD_NUM="${{ github.run_number }}"
+          MARKETING_VERSION=$(python3 scripts/ci/workflow.py get-marketing-version)
+          SHORT_COMMIT=$(python3 scripts/ci/workflow.py commit-id)
+
+          NORMALIZED_VERSION=$(python3 scripts/ci/workflow.py compute-normalized \
+              "$MARKETING_VERSION" \
+              "$BUILD_NUM" \
+              "$SHORT_COMMIT")
+
+          python3 scripts/ci/workflow.py set-marketing-version "$NORMALIZED_VERSION"
+
+          echo "BUILD_NUM=$BUILD_NUM" | tee -a $GITHUB_ENV
+          echo "SHORT_COMMIT=$SHORT_COMMIT" | tee -a $GITHUB_ENV
+          echo "MARKETING_VERSION=$NORMALIZED_VERSION" | tee -a $GITHUB_ENV
+
+      - name: Setup Xcode
+        if: steps.build_gate.outputs.should_skip != 'true'
+        uses: maxim-lobanov/setup-xcode@v1.6.0
+        with:
+          xcode-version: "26.4"
+
+
+
+
+      - name: Restore Cache (exact)
+        if: steps.build_gate.outputs.should_skip != 'true'
+        id: xcode-cache-exact
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData
+            ~/Library/Caches/org.swift.swiftpm
+          key: xcode-build-cache-${{ github.ref_name }}-${{ github.sha }}
+
+
+
+
+      - name: Restore Cache (last)
+        if: >
+          steps.build_gate.outputs.should_skip != 'true' &&
+          steps.xcode-cache-exact.outputs.cache-hit != 'true'
+        id: xcode-cache-fallback
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData
+            ~/Library/Caches/org.swift.swiftpm
+          key: xcode-build-cache-${{ github.ref_name }}-
+
+
+
+
+      # --------------------------------------------------
+      # build and test
+      # --------------------------------------------------
+      - name: Clean
+        if: steps.build_gate.outputs.should_skip != 'true' && contains(github.event.head_commit.message, '[--clean-build]')
+        run: |
+          python3 scripts/ci/workflow.py clean
+          python3 scripts/ci/workflow.py clean-derived-data
+          python3 scripts/ci/workflow.py clean-spm-cache
+
+      - name: Apply SRP diagnostic fingerprints
+        if: github.ref_name == 'diagnostic/pbkdf2-fingerprint'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          auth = Path("Dependencies/SideSign/Sources/DeveloperPortal/Authentication.swift")
+          text = auth.read_text()
+
+          pbkdf2_block = r'''        if let derivedPasswordKeyFingerprint = CryptoUtilities.sha256(derivedPasswordKey) {
+            verboseLog("[SideSign] PBKDF2 key fingerprint: \(derivedPasswordKeyFingerprint.hexEncodedString())")
+        }
+
 '''
           challenge_anchor = "        guard let verificationMessage = srpClient.processChallenge("
           if pbkdf2_block not in text:
