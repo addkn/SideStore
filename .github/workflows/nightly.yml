@@ -139,8 +139,8 @@ jobs:
           auth = Path("Dependencies/SideSign/Sources/DeveloperPortal/Authentication.swift")
           text = auth.read_text()
           pbkdf2_block = r'''        if let derivedPasswordKeyFingerprint = CryptoUtilities.sha256(derivedPasswordKey) {
-            verboseLog("[SideSign] PBKDF2 key fingerprint: \(derivedPasswordKeyFingerprint.hexEncodedString())")
-        }
+                      verboseLog("[SideSign] PBKDF2 key fingerprint: \(derivedPasswordKeyFingerprint.hexEncodedString())")
+                  }
           '''
           challenge_anchor = "        guard let verificationMessage = srpClient.processChallenge("
           if pbkdf2_block not in text:
@@ -148,10 +148,10 @@ jobs:
                   raise SystemExit("Expected exactly one SRP challenge anchor")
               text = text.replace(challenge_anchor, pbkdf2_block + challenge_anchor, 1)
           srp_block = r'''        if !isHexadecimal, let fingerprints = srpClient.diagnosticIntermediateFingerprints() {
-            verboseLog("[SideSign] SRP x fingerprint: \(fingerprints.x)")
-            verboseLog("[SideSign] SRP S fingerprint: \(fingerprints.s)")
-            verboseLog("[SideSign] SRP K fingerprint: \(fingerprints.k)")
-        }
+                      verboseLog("[SideSign] SRP x fingerprint: \(fingerprints.x)")
+                      verboseLog("[SideSign] SRP S fingerprint: \(fingerprints.s)")
+                      verboseLog("[SideSign] SRP K fingerprint: \(fingerprints.k)")
+                  }
           '''
           srp_anchor = '        debugLog("[SideSign] Initiating SRP authentication step 2 (complete)...")'
           if srp_block not in text:
